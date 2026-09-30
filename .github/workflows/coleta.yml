@@ -1,0 +1,99 @@
+name: Coleta de peças (shards)
+
+# Cada shard roda num runner próprio, com IP próprio: é assim que a coleta
+# paraleliza sem derrubar o aceite de CAPTCHA (2 workers no mesmo IP caem de
+# 40% para 27% de aceite). A fila vem do R2 e os PDFs voltam para o R2; nada
+# de dados passa pelo repositório, que é público.
+
+on:
+  workflow_dispatch:
+    inputs:
+      total_shards:
+        description: 'Número de shards (runners em paralelo)'
+        default: '10'
+      estagio:
+        description: 'Estágio da fila'
+        default: 'A'
+      via:
+        description: 'Via'
+        default: 'pan'
+        type: choice
+        options: [pan, recurso]
+      captcha:
+        description: 'Solver de CAPTCHA'
+        default: '2captcha'
+        type: choice
+        options: [2captcha, anticaptcha]
+      ate_minutos:
+        description: 'Teto de coleta por shard, em minutos (o job morre em 6h)'
+        default: '300'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coleta
+  cancel-in-progress: false
+
+jobs:
+  matriz:
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.m.outputs.shards }}
+    steps:
+      - id: m
+        run: echo "shards=$(python3 -c 'import json;print(json.dumps(list(range(${{ inputs.total_shards }}))))')" >> "$GITHUB_OUTPUT"
+
+  coleta:
+    needs: matriz
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard: ${{ fromJson(needs.matriz.outputs.shards) }}
+    env:
+      CI: 'true'
+      BASEPATENTES_SCRIPTS: ${{ github.workspace }}/scripts
+      CAPTCHA_API_KEY: ${{ secrets.CAPTCHA_API_KEY }}
+      CAPTCHA_API_KEY_2CAPTCHA: ${{ secrets.CAPTCHA_API_KEY }}
+      CAPTCHA_API_KEY_ANTICAPTCHA: ${{ secrets.CAPTCHA_API_KEY_ANTICAPTCHA }}
+      PEPI_USER: ${{ secrets.PEPI_USER }}
+      PEPI_PASS: ${{ secrets.PEPI_PASS }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Dependências
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Fila do R2
+        run: python scripts/r2.py baixar-fila
+
+      - name: Coleta (shard ${{ matrix.shard }} de ${{ inputs.total_shards }})
+        run: |
+          # Sync a cada 10 min: se o runner morrer, perde-se no máximo isso.
+          ( while sleep 600; do
+              python scripts/r2.py sync --run "${{ github.run_id }}" --shard "${{ matrix.shard }}" \
+                || echo "sync falhou (tenta de novo em 10 min)"
+            done ) &
+          python scripts/baixar_pecas.py \
+            --estagio "${{ inputs.estagio }}" --via "${{ inputs.via }}" \
+            --captcha "${{ inputs.captcha }}" \
+            --shard "${{ matrix.shard }}" --total-shards "${{ inputs.total_shards }}" \
+            --ate-minutos "${{ inputs.ate_minutos }}"
+
+      - name: Sync final
+        if: always()
+        run: python scripts/r2.py sync --run "${{ github.run_id }}" --shard "${{ matrix.shard }}"

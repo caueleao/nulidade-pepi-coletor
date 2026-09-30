@@ -1,0 +1,121 @@
+[inpi]
+rpi_index_url = "https://revistas.inpi.gov.br/rpi/"
+# URL base dos ZIPs: P{n}.zip para Patentes, C{n}.zip para Comunicados
+txt_base_url = "https://revistas.inpi.gov.br/txt/"
+busca_base_url = "https://busca.inpi.gov.br/pePI/servlet/PatenteServletController"
+user_agent = "PatentAI-Researcher/1.0"
+
+[paths]
+base_dir = ""  # resolvido em runtime via __file__; deixar vazio
+raw_dir = "data/raw"
+db_path = "data/patents.db"
+log_dir = "logs"
+comunicados_dir = "data/comunicados"
+
+[despachos]
+# Downloads PRIMÁRIOS: decisões finais de mérito (9.1/9.2) + concessão (16.1).
+# Demais códigos vêm via cascata histórica/petições ou só ficam na tabela
+# `despacho` (parse universal). 16.1 NÃO dispara cascata histórica.
+codigos_alvo = ["9.1", "9.2", "16.1"]
+codigos_bibliograficos = ["1.1", "1.3", "3.1", "9.1", "9.1.4", "9.2", "16.1", "2.10"]
+
+[despachos.dirs]
+"3.1"  = "data/pedido_publicado_3.1"
+"6.1"  = "data/exigencias_6.1"
+"6.21" = "data/exigencias_6.21"
+"6.22" = "data/exigencias_6.22"
+"6.23" = "data/exigencias_6.23"
+"7.1"  = "data/parecer_tecnico_7.1"
+"9.1"  = "data/deferimento_9.1"
+"9.2"  = "data/recurso_indeferimento_9.2"
+"16.1" = "data/concessao_16.1"
+"200"  = "data/peticao_200"
+"207"  = "data/peticao_207"
+"281"  = "data/peticao_281"
+
+[despachos.labels]
+"3.1"  = "Pedido Publicado"
+"6.1"  = "Exigência"
+"6.21" = "Exigência (6.21)"
+"6.22" = "Exigência (6.22)"
+"6.23" = "Exigência (6.23)"
+"7.1"  = "Parecer Técnico"
+"9.1"  = "Deferimento"
+"9.2"  = "Recurso Indeferimento"
+"16.1" = "Concessão"
+"200"  = "Protocolo de Depósito (petição do depositante)"
+"207"  = "Cumprimento de Exigência (petição do depositante)"
+"281"  = "Manifestação ao Parecer Técnico (petição do depositante)"
+
+# Cascata: ao processar um despacho de "gatilho" (9.1/9.2), aproveitar a navegação
+# para também baixar PDFs relacionados da mesma patente.
+#   - historico_codigos vêm da tabela "Publicações" do detail page pePI.
+#   - peticoes_91_codigos vêm da tabela "Serviços" (requer aceitar a
+#     "Declaração de Finalidade" antes); só dispara para o gatilho 9.1.
+[cascata]
+gatilho_codigos = ["9.1", "9.2"]
+historico_codigos = ["6.1", "6.21", "6.22", "6.23", "7.1"]
+peticoes_91_codigos = ["207", "281"]
+
+[http]
+timeout_sec = 30
+max_retries = 2
+# Aguardar entre tentativas (segundos)
+retry_wait_min = 1
+retry_wait_max = 10
+
+[pdf]
+enabled = true
+# Máximo de PDFs a baixar por execução (evitar sobrecarga)
+max_por_execucao = 1200
+# Após N falhas consecutivas por despacho, exclui da fila até reset manual
+backoff_max_tentativas = 3
+
+[browser]
+# false = visível (MVP / debug); true = headless (produção com 2captcha)
+headless = false
+storage_state_path = "data/.pepi_session.json"
+# Intervalo entre downloads em segundos (jitter aleatório entre min e max)
+# 30-60s evita bloqueio do INPI (testado: 8-12s causava bloqueio após ~10 PDFs)
+rate_min_sec = 30
+rate_max_sec = 60
+# Pausa longa a cada N PDFs para resfriar
+batch_size = 10
+batch_pause_sec = 180
+# Timeout de navegação em milissegundos
+nav_timeout_ms = 120000
+# slow_mo_ms = 0 em produção; aumentar para 200-500 ao depurar
+slow_mo_ms = 0
+
+[captcha]
+# "manual"      → usuário resolve na janela visível (MVP)
+# "2captcha"    → solver pago via 2captcha.com
+# "anticaptcha" → solver pago via anti-captcha.com (PADRÃO atual; 2captcha está com saldo zerado)
+mode = "anticaptcha"
+# Nome da variável de ambiente que contém a chave da API (nunca hardcoded)
+api_key_env = "CAPTCHA_API_KEY"
+# Timeout de espera pela resolução (segundos) — manual: tempo para o usuário; auto: timeout do solver
+timeout_sec = 300
+# Disjuntor: para se este número de CAPTCHAs for excedido num único run
+max_per_run = 1500
+# Tokens resolvidos por documento antes de desistir. O INPI recusa uma fração
+# alta dos tokens ("Dados incorretos") mesmo com o solver acertando: medido em
+# 2026-08-07/08, 12-40% de aceite por token, tanto no IP local quanto nos
+# runners do CI. Cada token custa ~US$0,0017, então insistir é barato:
+# com 12,5% de aceite, 3 tentativas cobrem 33% dos documentos e 6 cobrem 55%.
+max_tentativas_documento = 6
+
+[proxy]
+# Habilita uso de proxy residencial rotativo. Quando true, BrowserSession
+# carrega credenciais do .env e injeta na sessão Playwright.
+# NOTA: IPRoyal Residential bloqueia .gov por padrão (libera só após >$500 gastos).
+# Não usar IPRoyal para INPI. Provedores alternativos a avaliar: Smartproxy, Soax,
+# Brightdata. Por enquanto desabilitado — usando rede direta (4G) sequencialmente.
+enabled = false
+# Endpoint do gateway IPRoyal (sticky session via -session-{id} no username)
+server = "http://geo.iproyal.com:12321"
+# Variáveis de ambiente que contêm user/pass (nunca hardcoded)
+user_env = "IPROYAL_USER"
+pass_env = "IPROYAL_PASS"
+# País dos IPs residenciais (br = Brasil; usar IPs nacionais para INPI)
+country = "br"
