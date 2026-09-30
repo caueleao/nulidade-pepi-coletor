@@ -141,6 +141,31 @@ def salva_peca(con, numero: str, via: str, tipo: str, codigo: str, rotulo: str,
     return pid
 
 
+PEPI = "https://busca.inpi.gov.br/pePI/"
+
+
+def _rede_ok() -> bool:
+    """O pePI responde daqui? Distingue queda de rede de caso realmente sem dados."""
+    import urllib.request
+    try:
+        urllib.request.urlopen(PEPI, timeout=20).close()
+        return True
+    except Exception:
+        return False
+
+
+def _espera_rede() -> None:
+    """Segura a fila até o pePI voltar. Sem isso, uma queda de rede de minutos
+    marca a fila inteira como erro em segundos (aconteceu em 2026-09-30)."""
+    t0 = time.monotonic()
+    while not _rede_ok():
+        if int(time.monotonic() - t0) % 600 < 60:
+            log.warning("pePI inacessível há %.0f min; aguardando a rede voltar",
+                        (time.monotonic() - t0) / 60)
+        time.sleep(60)
+    log.info("pePI de volta após %.0f min", (time.monotonic() - t0) / 60)
+
+
 def _pausa(i: int) -> None:
     time.sleep(random.uniform(bp_cfg.BROWSER_RATE_MIN, bp_cfg.BROWSER_RATE_MAX))
     if i and i % bp_cfg.BROWSER_BATCH_SIZE == 0:
@@ -371,6 +396,8 @@ def main() -> int:
             log.info("[%d/%d] %s (%s)", n, len(casos), numero, via)
             try:
                 r = visita(b, con, numero, via)
+                if r["erro"] and not _rede_ok():
+                    raise ConnectionError(r["erro"])   # "não encontrado" por falta de rede
             except RuntimeError as e:      # disjuntor
                 log.error("disjuntor acionado: %s", e)
                 con.execute("UPDATE fila_caso SET status='fila', erro=?,"
@@ -379,6 +406,12 @@ def main() -> int:
                 con.commit()
                 break
             except Exception as e:
+                if not _rede_ok():
+                    # Queda de rede não é defeito do caso: espera e segue; o caso
+                    # continua 'fila' e volta na próxima execução.
+                    log.warning("rede caiu em %s: %s", numero, str(e)[:120])
+                    _espera_rede()
+                    continue
                 log.exception("erro em %s", numero)
                 con.execute("UPDATE fila_caso SET status='erro', tentativas=tentativas+1,"
                             " erro=?, atualizado_em=? WHERE numero_inpi=? AND via=?",
