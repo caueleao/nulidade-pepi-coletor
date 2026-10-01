@@ -220,7 +220,9 @@ def sonda(browser, con, numero: str, via: str) -> dict:
 
 def visita(browser, con, numero: str, via: str) -> dict:
     """Uma visita ao processo: baixa os despachos do caso e as petições das partes."""
-    res = {"despachos": 0, "peticoes": 0, "erro": None}
+    # "falhas" conta peça que existe e não veio (timeout, CAPTCHA, PDF inválido). Caso
+    # com falha não é "visitado": volta para a fila e a próxima visita pega o resto.
+    res = {"despachos": 0, "peticoes": 0, "erro": None, "falhas": 0}
     alvos = {r["codigo"]: r["rotulo"] for r in con.execute(
         "SELECT codigo, rotulo FROM fila_peca WHERE numero_inpi=? AND via=?"
         " AND tipo='despacho'", (numero, via))}
@@ -255,6 +257,7 @@ def visita(browser, con, numero: str, via: str) -> dict:
             raise                      # disjuntor de CAPTCHA: propaga
         except Exception as e:
             log.warning("    %s %s: %s", numero, p["codigo"], str(e)[:120])
+            res["falhas"] += 1
             continue
         if pdf and pdf[:4] == b"%PDF" and len(pdf) > 1000:
             salva_peca(con, numero, via, "despacho", p["codigo"],
@@ -263,6 +266,8 @@ def visita(browser, con, numero: str, via: str) -> dict:
             res["despachos"] += 1
             log.info("    ok despacho %s rpi=%s (%d KB)", p["codigo"], p["rpi"],
                      len(pdf) // 1024)
+        else:
+            res["falhas"] += 1
         _pausa(i + 1)
 
     # Petições: exigem aceitar a Declaração de Finalidade. A ordem importa — o
@@ -288,6 +293,7 @@ def visita(browser, con, numero: str, via: str) -> dict:
                         raise
                     except Exception as e:
                         log.warning("    petição %s: %s", s.get("codigo"), str(e)[:120])
+                        res["falhas"] += 1
                         continue
                     if pdf and pdf[:4] == b"%PDF" and len(pdf) > 1000:
                         salva_peca(con, numero, via, "peticao", s["codigo"],
@@ -296,11 +302,18 @@ def visita(browser, con, numero: str, via: str) -> dict:
                         res["peticoes"] += 1
                         log.info("    ok petição %s prot=%s (%d KB)", s["codigo"],
                                  s.get("protocolo"), len(pdf) // 1024)
+                    else:
+                        res["falhas"] += 1
                     _pausa(i + 1)
+            else:
+                # Sem o aceite a aba Serviços não abre e as petições somem em silêncio.
+                log.warning("  %s: Declaração de Finalidade não aceita; petições não lidas", numero)
+                res["falhas"] += 1
         except RuntimeError:
             raise
         except Exception as e:
             log.warning("  %s: Serviços indisponíveis: %s", numero, str(e)[:150])
+            res["falhas"] += 1
     return res
 
 
@@ -420,11 +433,21 @@ def main() -> int:
                 falhas += 1
                 continue
             total = r["despachos"] + r["peticoes"]
-            status = "visitado" if not r["erro"] else "indisponivel"
+            tent = con.execute("SELECT tentativas FROM fila_caso WHERE numero_inpi=? AND via=?",
+                               (numero, via)).fetchone()[0] + 1
+            if r["erro"]:
+                status, erro = "indisponivel", r["erro"]
+            elif r["falhas"]:
+                # Três visitas com falha e o caso sai da fila como erro, para não
+                # girar para sempre num documento que o pePI nunca entrega.
+                status = "fila" if tent < 3 else "erro"
+                erro = f"{r['falhas']} peça(s) não vieram na visita {tent}"
+            else:
+                status, erro = "visitado", None
             con.execute(
                 "UPDATE fila_caso SET status=?, n_servicos=?, erro=?,"
-                " tentativas=tentativas+1, atualizado_em=? WHERE numero_inpi=? AND via=?",
-                (status, r["peticoes"], r["erro"], _agora(), numero, via))
+                " tentativas=?, atualizado_em=? WHERE numero_inpi=? AND via=?",
+                (status, r["peticoes"], erro, tent, _agora(), numero, via))
             con.commit()
             ok += 1
             log.info("  -> %d peça(s): %d despacho(s), %d petição(ões)%s",
