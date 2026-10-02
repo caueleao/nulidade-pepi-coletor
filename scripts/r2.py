@@ -6,6 +6,8 @@ Layout no bucket, tudo sob o prefixo `nulidade/`:
   nulidade/fila.db.gz                     fila enxuta que cada shard recebe
   nulidade/pdfs/<via>/<processo>/<peça>   PDFs, na mesma árvore de `data/pdfs`
   nulidade/runs/<run>/shard_<k>.db.gz     base de cada shard ao fim (ou a cada sync)
+  nulidade/fila_trf2.db.gz                fila das decisões do TRF2 (1º e 2º grau)
+  nulidade/runs/<run>/trf2_<k>.db.gz      base de cada shard do TRF2
 
 Credenciais vêm do ambiente (R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID,
 R2_SECRET_KEY): no CI, dos secrets; no Mac, do `config/.env` da BasePatentes,
@@ -96,17 +98,17 @@ def snapshot(origem: Path, destino: Path) -> None:
     dst.close()
 
 
-def cmd_baixar_fila(_args) -> int:
-    baixa_gz(cliente(), f"{PREFIXO}/fila.db.gz", c.DB)
+def cmd_baixar_fila(args) -> int:
+    baixa_gz(cliente(), f"{PREFIXO}/{args.nome}", c.DB)
     print(f"fila em {c.DB} ({c.DB.stat().st_size // 1024} KB)")
     return 0
 
 
 def cmd_sync(args) -> int:
     s3 = cliente()
-    ja = set(lista(s3, f"{PREFIXO}/pdfs/"))
+    ja = set() if args.sem_pdfs else set(lista(s3, f"{PREFIXO}/pdfs/"))
     novos = 0
-    for pdf in sorted(c.PDFS.rglob("*.pdf")):
+    for pdf in ([] if args.sem_pdfs else sorted(c.PDFS.rglob("*.pdf"))):
         chave = f"{PREFIXO}/pdfs/{pdf.relative_to(c.PDFS).as_posix()}"
         if chave not in ja:
             s3.upload_file(str(pdf), bucket(), chave)
@@ -115,7 +117,7 @@ def cmd_sync(args) -> int:
         with tempfile.TemporaryDirectory() as d:
             snap = Path(d) / "shard.db"
             snapshot(c.DB, snap)
-            envia_gz(s3, snap, f"{PREFIXO}/runs/{args.run}/shard_{args.shard}.db.gz")
+            envia_gz(s3, snap, f"{PREFIXO}/runs/{args.run}/{args.base}_{args.shard}.db.gz")
     print(f"sync: {novos} PDF(s) novo(s); base do shard {args.shard} enviada")
     return 0
 
@@ -124,10 +126,14 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("baixar-fila").set_defaults(f=cmd_baixar_fila)
+    b = sub.add_parser("baixar-fila")
+    b.add_argument("--nome", default="fila.db.gz", help="fila.db.gz (pePI) ou fila_trf2.db.gz")
+    b.set_defaults(f=cmd_baixar_fila)
     s = sub.add_parser("sync")
     s.add_argument("--run", required=True)
     s.add_argument("--shard", required=True)
+    s.add_argument("--base", default="shard", help="prefixo do arquivo: shard (pePI) ou trf2")
+    s.add_argument("--sem-pdfs", action="store_true", help="só a base (coleta do TRF2)")
     s.set_defaults(f=cmd_sync)
     args = p.parse_args()
     return args.f(args)

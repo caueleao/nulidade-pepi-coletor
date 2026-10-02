@@ -1,0 +1,88 @@
+name: Decisões do TRF2 (shards)
+
+# Texto das sentenças (1º grau, eproc da JFRJ) e dos acórdãos (2º grau, eproc do
+# TRF2) das ações de nulidade de patente. O gargalo é o limite de acessos por IP
+# do portal (429), não a espera: cada runner tem IP próprio, então N shards
+# rendem ~N vezes. A fila vem do R2 e a base de cada shard volta para lá.
+
+on:
+  workflow_dispatch:
+    inputs:
+      instancia:
+        description: 'g1 = sentenças (JFRJ); g2 = acórdãos (TRF2)'
+        default: 'g1'
+        type: choice
+        options: [g1, g2]
+      total_shards:
+        description: 'Número de shards (runners em paralelo)'
+        default: '5'
+      intervalo:
+        description: 'Segundos médios entre processos em cada shard'
+        default: '300'
+      ate_minutos:
+        description: 'Teto de coleta por shard, em minutos (o job morre em 6h)'
+        default: '300'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: decisoes-${{ inputs.instancia }}
+  cancel-in-progress: false
+
+jobs:
+  matriz:
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.m.outputs.shards }}
+    steps:
+      - id: m
+        run: echo "shards=$(python3 -c 'import json;print(json.dumps(list(range(${{ inputs.total_shards }}))))')" >> "$GITHUB_OUTPUT"
+
+  coleta:
+    needs: matriz
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard: ${{ fromJson(needs.matriz.outputs.shards) }}
+    env:
+      CI: 'true'
+      BASEPATENTES_SCRIPTS: ${{ github.workspace }}/scripts
+      CAPTCHA_API_KEY: ${{ secrets.CAPTCHA_API_KEY }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Dependências
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Fila do R2
+        run: python scripts/r2.py baixar-fila --nome fila_trf2.db.gz
+
+      - name: Coleta (${{ inputs.instancia }}, shard ${{ matrix.shard }} de ${{ inputs.total_shards }})
+        run: |
+          ( while sleep 600; do
+              python scripts/r2.py sync --run "${{ github.run_id }}" --shard "${{ matrix.shard }}" \
+                --base trf2 --sem-pdfs || echo "sync falhou (tenta de novo em 10 min)"
+            done ) &
+          python scripts/baixar_decisoes_trf2.py --sem-montar \
+            --instancia "${{ inputs.instancia }}" \
+            --shard "${{ matrix.shard }}" --total-shards "${{ inputs.total_shards }}" \
+            --intervalo "${{ inputs.intervalo }}" --ate-minutos "${{ inputs.ate_minutos }}"
+
+      - name: Sync final
+        if: always()
+        run: python scripts/r2.py sync --run "${{ github.run_id }}" --shard "${{ matrix.shard }}" --base trf2 --sem-pdfs
