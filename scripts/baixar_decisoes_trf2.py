@@ -187,7 +187,7 @@ def visita(pg, con, cnj: str, todos: bool) -> int:
         docs.append((rot, m.group(1), href, evento))
     ja = {r[0] for r in con.execute("SELECT doc_id FROM decisao_judicial WHERE num_cnj=?", (cnj,))}
 
-    n = 0
+    n = falhas = 0
     for rot, doc_id, href, evento in docs:
         if doc_id in ja:
             continue
@@ -202,6 +202,12 @@ def visita(pg, con, cnj: str, todos: bool) -> int:
             pass
         _checa_429(pg)
         texto = pg.inner_text("#divdochtml") if pg.locator("#divdochtml").count() else ""
+        if len(texto.strip()) < 200:
+            # Texto que não carregou não pode virar "baixado": o doc_id gravado
+            # tiraria o documento da próxima visita para sempre.
+            log.warning("    %s %s: texto não carregou (%d chars)", cnj, rot, len(texto))
+            falhas += 1
+            continue
         con.execute(
             "INSERT OR REPLACE INTO decisao_judicial (num_cnj, rotulo, evento, doc_id, texto,"
             " chars, sha256, baixado_em, instancia) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -210,6 +216,10 @@ def visita(pg, con, cnj: str, todos: bool) -> int:
         con.commit()
         n += 1
         log.info("    %s %s: %d chars", cnj, rot, len(texto))
+    if falhas:
+        # O processo volta como 'erro' (que entra na próxima rodada); os
+        # documentos que vieram ficam e não são baixados de novo.
+        raise RuntimeError(f"{falhas} documento(s) sem texto; {n} baixado(s)")
     return n
 
 
