@@ -1,6 +1,6 @@
 name: Diagnóstico de acesso ao INPI
 
-# O INPI às vezes deixa de responder a faixas de datacenter. Antes de disparar
+# Também os eproc da JFRJ e do TRF2. O INPI às vezes deixa de responder a faixas de datacenter. Antes de disparar
 # shards, confirmar que o runner alcança o pePI (5 runners = 5 IPs).
 
 on: workflow_dispatch
@@ -19,6 +19,6 @@ jobs:
     steps:
       - run: |
           echo "IP: $(curl -s -m 10 https://api.ipify.org)"
-          for u in https://busca.inpi.gov.br/pePI/ https://www.gov.br/inpi/ https://revistas.inpi.gov.br/rpi/ https://dadosabertos.inpi.gov.br/; do
-            curl -s -o /dev/null -m 20 -w "%{http_code} %{time_total}s $u\n" "$u" || echo "FALHA $u"
+          for u in https://busca.inpi.gov.br/pePI/ https://www.gov.br/inpi/ https://revistas.inpi.gov.br/rpi/ https://dadosabertos.inpi.gov.br/ https://eproc-consulta.jfrj.jus.br/eproc/externo_controlador.php?acao=processo_consulta_publica https://eproc-consulta.trf2.jus.br/eproc/externo_controlador.php?acao=processo_consulta_publica; do
+            curl -sL -o /tmp/p.html -m 20 -w "%{http_code} %{time_total}s $u" "$u" && echo " turnstile=$(grep -c cf-turnstile /tmp/p.html)" || echo "FALHA $u"
           done
